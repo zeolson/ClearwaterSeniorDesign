@@ -11,15 +11,18 @@ class SensorCsvLogger(DeviceMonitorFilterBase):
     HEADER = [
         "host_timestamp_utc",
         "device_uptime_ms",
-        "sensor",
         "ph",
+        "ph_temperature_c",
         "orp_mv",
+        "orp_temperature_c",
         "ec_us_cm",
-        "temperature_c",
+        "ec_temperature_c",
         "salinity_ppm",
         "tds_ppm",
         "depth_m",
-        "status",
+        "ph_status",
+        "orp_status",
+        "ec_status",
     ]
 
     def __init__(self, *args, **kwargs):
@@ -56,7 +59,7 @@ class SensorCsvLogger(DeviceMonitorFilterBase):
             return
 
         fields = next(csv.reader([line]))
-        if len(fields) != 11:
+        if len(fields) != 14:
             return
 
         timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")

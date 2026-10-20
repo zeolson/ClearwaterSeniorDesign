@@ -8,10 +8,7 @@ namespace {
 
 HardwareSerial sensorSerial(2);
 
-constexpr uint8_t READ_PRIMARY_REQUEST[] = {
-    0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xC4, 0x0B};
-constexpr uint8_t READ_EC_SECONDARY_REQUEST[] = {
-    0x01, 0x03, 0x00, 0x02, 0x00, 0x02, 0x65, 0xCB};
+constexpr size_t REQUEST_SIZE = 8;
 constexpr size_t RESPONSE_SIZE = 9;
 
 uint16_t modbusCrc(const uint8_t *data, size_t length) {
@@ -49,10 +46,24 @@ void clearSensorInput() {
   }
 }
 
-bool transact(const uint8_t *request, uint8_t *response) {
+void buildReadRequest(uint8_t address, uint16_t firstRegister,
+                      uint16_t registerCount, uint8_t *request) {
+  request[0] = address;
+  request[1] = 0x03;
+  request[2] = static_cast<uint8_t>(firstRegister >> 8);
+  request[3] = static_cast<uint8_t>(firstRegister);
+  request[4] = static_cast<uint8_t>(registerCount >> 8);
+  request[5] = static_cast<uint8_t>(registerCount);
+  const uint16_t crc = modbusCrc(request, REQUEST_SIZE - 2);
+  request[6] = static_cast<uint8_t>(crc);
+  request[7] = static_cast<uint8_t>(crc >> 8);
+}
+
+bool transact(const uint8_t *request, uint8_t expectedAddress,
+              uint8_t *response) {
   clearSensorInput();
-  printBytes("TX: ", request, 8);
-  sensorSerial.write(request, 8);
+  printBytes("TX: ", request, REQUEST_SIZE);
+  sensorSerial.write(request, REQUEST_SIZE);
   sensorSerial.flush();
 
   size_t received = 0;
@@ -73,7 +84,7 @@ bool transact(const uint8_t *request, uint8_t *response) {
     Serial.println(" of 9 bytes)");
     return false;
   }
-  if (response[0] != SENSOR_MODBUS_ADDRESS || response[1] != 0x03 ||
+  if (response[0] != expectedAddress || response[1] != 0x03 ||
       response[2] != 0x04) {
     Serial.println("ERROR: unexpected Modbus address, function, or byte count");
     return false;
@@ -104,117 +115,133 @@ int16_t signedRegister(const uint8_t high, const uint8_t low) {
 }
 
 struct Measurement {
-  bool primaryValid = false;
-  bool secondaryValid = false;
+  bool phValid = false;
+  bool orpValid = false;
+  bool ecPrimaryValid = false;
+  bool ecSecondaryValid = false;
   bool depthValid = false;
   float ph = 0.0F;
+  float phTemperature = 0.0F;
   int16_t orp = 0;
+  float orpTemperature = 0.0F;
   uint16_t ec = 0;
-  float temperature = 0.0F;
+  float ecTemperature = 0.0F;
   uint16_t salinity = 0;
   uint16_t tds = 0;
   float depthMeters = 0.0F;
 };
 
-void readPrimaryMeasurement(Measurement &measurement) {
-  uint8_t response[RESPONSE_SIZE] = {};
-  if (!transact(READ_PRIMARY_REQUEST, response)) {
-    return;
-  }
-
-  measurement.temperature =
-      signedRegister(response[5], response[6]) / 10.0F;
-  if (SENSOR_TYPE == SensorType::PH) {
-    measurement.ph = unsignedRegister(response[3], response[4]) / 100.0F;
-    Serial.print("pH: ");
-    Serial.print(measurement.ph, 2);
-  } else if (SENSOR_TYPE == SensorType::ORP) {
-    measurement.orp = signedRegister(response[3], response[4]);
-    Serial.print("ORP: ");
-    Serial.print(measurement.orp);
-    Serial.print(" mV");
-  } else {
-    measurement.ec = unsignedRegister(response[3], response[4]);
-    Serial.print("EC: ");
-    Serial.print(measurement.ec);
-    Serial.print(" uS/cm");
-  }
-  Serial.print("  Temperature: ");
-  Serial.print(measurement.temperature, 1);
-  Serial.println(" C");
-  measurement.primaryValid = true;
+bool readRegisters(uint8_t address, uint16_t firstRegister,
+                   uint8_t *response) {
+  uint8_t request[REQUEST_SIZE] = {};
+  buildReadRequest(address, firstRegister, 2, request);
+  return transact(request, address, response);
 }
 
-void readEcSecondaryMeasurements(Measurement &measurement) {
+void readPh(Measurement &measurement) {
+  Serial.print("Polling pH sensor at address ");
+  Serial.println(PH_MODBUS_ADDRESS);
   uint8_t response[RESPONSE_SIZE] = {};
-  if (!transact(READ_EC_SECONDARY_REQUEST, response)) {
+  if (!readRegisters(PH_MODBUS_ADDRESS, 0x0000, response)) {
     return;
   }
 
+  measurement.ph = unsignedRegister(response[3], response[4]) / 100.0F;
+  measurement.phTemperature =
+      signedRegister(response[5], response[6]) / 10.0F;
+  measurement.phValid = true;
+  Serial.print("pH: ");
+  Serial.print(measurement.ph, 2);
+  Serial.print("  Temperature: ");
+  Serial.print(measurement.phTemperature, 1);
+  Serial.println(" C");
+}
+
+void readOrp(Measurement &measurement) {
+  Serial.print("Polling ORP sensor at address ");
+  Serial.println(ORP_MODBUS_ADDRESS);
+  uint8_t response[RESPONSE_SIZE] = {};
+  if (!readRegisters(ORP_MODBUS_ADDRESS, 0x0000, response)) {
+    return;
+  }
+
+  measurement.orp = signedRegister(response[3], response[4]);
+  measurement.orpTemperature =
+      signedRegister(response[5], response[6]) / 10.0F;
+  measurement.orpValid = true;
+  Serial.print("ORP: ");
+  Serial.print(measurement.orp);
+  Serial.print(" mV  Temperature: ");
+  Serial.print(measurement.orpTemperature, 1);
+  Serial.println(" C");
+}
+
+void readEc(Measurement &measurement) {
+  Serial.print("Polling EC sensor at address ");
+  Serial.println(EC_MODBUS_ADDRESS);
+  uint8_t response[RESPONSE_SIZE] = {};
+  if (readRegisters(EC_MODBUS_ADDRESS, 0x0000, response)) {
+    measurement.ec = unsignedRegister(response[3], response[4]);
+    measurement.ecTemperature =
+        signedRegister(response[5], response[6]) / 10.0F;
+    measurement.ecPrimaryValid = true;
+    Serial.print("EC: ");
+    Serial.print(measurement.ec);
+    Serial.print(" uS/cm  Temperature: ");
+    Serial.print(measurement.ecTemperature, 1);
+    Serial.println(" C");
+  }
+
+  delay(INTER_SENSOR_DELAY_MS);
+  if (!readRegisters(EC_MODBUS_ADDRESS, 0x0002, response)) {
+    return;
+  }
   measurement.salinity = unsignedRegister(response[3], response[4]);
   measurement.tds = unsignedRegister(response[5], response[6]);
+  measurement.ecSecondaryValid = true;
   Serial.print("Salinity: ");
   Serial.print(measurement.salinity);
   Serial.print(" ppm  TDS: ");
   Serial.print(measurement.tds);
   Serial.println(" ppm");
-  measurement.secondaryValid = true;
-}
-
-const char *sensorName() {
-  switch (SENSOR_TYPE) {
-    case SensorType::PH:
-      return "SEN0708 pH";
-    case SensorType::ORP:
-      return "SEN0709 ORP";
-    case SensorType::EC:
-      return "SEN0707 EC";
-  }
-  return "unknown";
-}
-
-const char *sensorCsvName() {
-  switch (SENSOR_TYPE) {
-    case SensorType::PH:
-      return "PH";
-    case SensorType::ORP:
-      return "ORP";
-    case SensorType::EC:
-      return "EC";
-  }
-  return "UNKNOWN";
 }
 
 void printCsvRecord(const Measurement &measurement) {
   // The host monitor filter recognizes DATA records and adds wall-clock time.
-  // Fields: uptime,sensor,pH,ORP,EC,temp,salinity,TDS,depth,status
+  // Fields: uptime,pH,pH temp,ORP,ORP temp,EC,EC temp,salinity,TDS,
+  // depth,pH status,ORP status,EC status
   Serial.print("DATA,");
   Serial.print(millis());
   Serial.print(',');
-  Serial.print(sensorCsvName());
-  Serial.print(',');
-
-  if (measurement.primaryValid && SENSOR_TYPE == SensorType::PH) {
+  if (measurement.phValid) {
     Serial.print(measurement.ph, 2);
   }
   Serial.print(',');
-  if (measurement.primaryValid && SENSOR_TYPE == SensorType::ORP) {
+  if (measurement.phValid) {
+    Serial.print(measurement.phTemperature, 1);
+  }
+  Serial.print(',');
+  if (measurement.orpValid) {
     Serial.print(measurement.orp);
   }
   Serial.print(',');
-  if (measurement.primaryValid && SENSOR_TYPE == SensorType::EC) {
+  if (measurement.orpValid) {
+    Serial.print(measurement.orpTemperature, 1);
+  }
+  Serial.print(',');
+  if (measurement.ecPrimaryValid) {
     Serial.print(measurement.ec);
   }
   Serial.print(',');
-  if (measurement.primaryValid) {
-    Serial.print(measurement.temperature, 1);
+  if (measurement.ecPrimaryValid) {
+    Serial.print(measurement.ecTemperature, 1);
   }
   Serial.print(',');
-  if (measurement.secondaryValid && SENSOR_TYPE == SensorType::EC) {
+  if (measurement.ecSecondaryValid) {
     Serial.print(measurement.salinity);
   }
   Serial.print(',');
-  if (measurement.secondaryValid && SENSOR_TYPE == SensorType::EC) {
+  if (measurement.ecSecondaryValid) {
     Serial.print(measurement.tds);
   }
   Serial.print(',');
@@ -222,10 +249,13 @@ void printCsvRecord(const Measurement &measurement) {
     Serial.print(measurement.depthMeters, 3);
   }
   Serial.print(',');
-
-  if (!measurement.primaryValid) {
+  Serial.print(measurement.phValid ? "ok" : "error");
+  Serial.print(',');
+  Serial.print(measurement.orpValid ? "ok" : "error");
+  Serial.print(',');
+  if (!measurement.ecPrimaryValid) {
     Serial.println("primary_error");
-  } else if (SENSOR_TYPE == SensorType::EC && !measurement.secondaryValid) {
+  } else if (!measurement.ecSecondaryValid) {
     Serial.println("secondary_error");
   } else {
     Serial.println("ok");
@@ -241,9 +271,13 @@ void setup() {
                      RS485_UART_TX_PIN);
 
   Serial.println();
-  Serial.println("Clearwater single-sensor RS-485 test");
-  Serial.print("Sensor: ");
-  Serial.println(sensorName());
+  Serial.println("Clearwater three-sensor RS-485 multidrop test");
+  Serial.print("Addresses: pH=");
+  Serial.print(PH_MODBUS_ADDRESS);
+  Serial.print(", ORP=");
+  Serial.print(ORP_MODBUS_ADDRESS);
+  Serial.print(", EC=");
+  Serial.println(EC_MODBUS_ADDRESS);
   Serial.print("UART: 4800 8N1, RX GPIO ");
   Serial.print(RS485_UART_RX_PIN);
   Serial.print(", TX GPIO ");
@@ -253,11 +287,11 @@ void setup() {
 void loop() {
   Serial.println();
   Measurement measurement;
-  readPrimaryMeasurement(measurement);
-  if (SENSOR_TYPE == SensorType::EC) {
-    delay(250);
-    readEcSecondaryMeasurements(measurement);
-  }
+  readPh(measurement);
+  delay(INTER_SENSOR_DELAY_MS);
+  readOrp(measurement);
+  delay(INTER_SENSOR_DELAY_MS);
+  readEc(measurement);
   printCsvRecord(measurement);
   delay(SENSOR_POLL_INTERVAL_MS);
 }
