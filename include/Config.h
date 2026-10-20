@@ -7,7 +7,7 @@ enum class SensorType {
 };
 
 // Change only this value when swapping the single sensor on the test bench.
-constexpr SensorType SENSOR_TYPE = SensorType::PH;
+constexpr SensorType SENSOR_TYPE = SensorType::ORP;
 
 constexpr unsigned long USB_BAUD = 115200;
 constexpr unsigned long SENSOR_BAUD = 4800;
