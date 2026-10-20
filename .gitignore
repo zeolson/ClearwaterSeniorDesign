@@ -6,4 +6,5 @@
 .DS_Store
 *.log
 logs/
+__pycache__/
 *.md
